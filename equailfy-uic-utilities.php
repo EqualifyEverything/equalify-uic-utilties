@@ -2,8 +2,8 @@
 /*
 Plugin Name: Equalify + UIC Network Utilities
 Description: Scans content for PDF and Box.com links and exports CSV. Network-enabled.
-Version: 1.0
-Author: Your Name
+Version: 1.1
+Author: Blake Bertuccelli-Booth (UIC)
 Network: true
 */
 
@@ -63,17 +63,50 @@ function render_link_scanner_page()
     $download_url = '';
     $selected_site = isset($_POST['site_id']) ? (int) $_POST['site_id'] : get_current_blog_id();
 
-    // Process form submission to run link scans
-    if ($_SERVER['REQUEST_METHOD'] === 'POST' && check_admin_referer('run_link_scan')) {
-        switch_to_blog($selected_site);
+    // Unified POST and nonce logic for bulk and scan actions
+    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
+        if ((isset($_POST['download_all_reports']) || isset($_POST['delete_all_reports'])) && check_admin_referer('bulk_report_action')) {
+            if (isset($_POST['download_all_reports'])) {
+                $zip = new ZipArchive();
+                $zip_name = 'all-link-reports-' . time() . '.zip';
+                $upload_dir = wp_upload_dir();
+                $zip_path = trailingslashit($upload_dir['basedir']) . $zip_name;
+                $zip_url = trailingslashit($upload_dir['baseurl']) . $zip_name;
 
-        if (isset($_POST['find_pdf_links'])) {
-            $download_url = scan_links_and_generate_csv('pdf');
-        } elseif (isset($_POST['find_box_links'])) {
-            $download_url = scan_links_and_generate_csv('box');
+                if ($zip->open($zip_path, ZipArchive::CREATE) === TRUE) {
+                    foreach (get_sites(['public' => 1]) as $site) {
+                        switch_to_blog($site->blog_id);
+                        $site_name = sanitize_title(get_blog_details($site->blog_id)->blogname);
+                        $files = glob(trailingslashit(wp_upload_dir()['basedir']) . '*.csv') ?: [];
+                        foreach ($files as $file) {
+                            $zip->addFile($file, $site_name . '/' . basename($file));
+                        }
+                        restore_current_blog();
+                    }
+                    $zip->close();
+                    echo '<div class="notice notice-success"><p>Zip of reports generated. <a href="' . esc_url($zip_url) . '">Download All Reports</a></p></div>';
+                }
+            }
+            if (isset($_POST['delete_all_reports'])) {
+                foreach (get_sites(['public' => 1]) as $site) {
+                    switch_to_blog($site->blog_id);
+                    $files = glob(trailingslashit(wp_upload_dir()['basedir']) . '*.csv') ?: [];
+                    foreach ($files as $file) {
+                        unlink($file);
+                    }
+                    restore_current_blog();
+                }
+                echo '<div class="notice notice-success"><p>All reports deleted.</p></div>';
+            }
+        } elseif ((isset($_POST['find_pdf_links']) || isset($_POST['find_box_links'])) && check_admin_referer('run_link_scan')) {
+            switch_to_blog($selected_site);
+            if (isset($_POST['find_pdf_links'])) {
+                $download_url = scan_links_and_generate_csv('pdf');
+            } elseif (isset($_POST['find_box_links'])) {
+                $download_url = scan_links_and_generate_csv('box');
+            }
+            restore_current_blog();
         }
-
-        restore_current_blog();
     }
 
     // Retrieve all public sites for dropdown and report listing
@@ -108,7 +141,7 @@ function render_link_scanner_page()
         foreach ($sites as $site) {
             switch_to_blog($site->blog_id);
             $upload_dir = wp_upload_dir();
-            $files = glob(trailingslashit($upload_dir['basedir']) . 'link-scan-*.csv') ?: [];
+            $files = glob(trailingslashit($upload_dir['basedir']) . '*.csv') ?: [];
 
             foreach ($files as $file_path) {
                 $all_reports[] = [
@@ -130,6 +163,13 @@ function render_link_scanner_page()
         }
         ?>
         </ul>
+        <?php if (!empty($all_reports)) : ?>
+            <form method="post" style="margin-top: 1em;">
+                <?php wp_nonce_field('bulk_report_action'); ?>
+                <input type="submit" name="download_all_reports" class="button" value="Zip All Reports">
+                <input type="submit" name="delete_all_reports" class="button" value="Delete All Reports" onclick="return confirm('Are you sure you want to delete all reports?');">
+            </form>
+        <?php endif; ?>
     </div>
     <?php
 }
@@ -171,11 +211,35 @@ function scan_links_and_generate_csv($type)
 
             if ($matches_type) {
                 $results[] = [
-                    'Location Type' => 'Post',
+                    'Location Type' => ($obj = get_post_type_object($post->post_type)) ? $obj->labels->singular_name : ucfirst($post->post_type),
                     'Title'         => get_the_title($post),
                     'Link'          => $link,
                     'URL'           => get_permalink($post),
                 ];
+            }
+        }
+
+        // Check ACF fields for matching links
+        if (function_exists('get_fields')) {
+            $fields = get_fields($post->ID);
+            if ($fields && is_array($fields)) {
+                foreach ($fields as $field_key => $field_value) {
+                    if (is_string($field_value)) {
+                        preg_match_all('/https?:\/\/[^\s"\']+/i', $field_value, $acf_matches);
+                        foreach ($acf_matches[0] as $link) {
+                            $matches_type = ($type === 'pdf' && preg_match('/\.pdf(\?.*)?$/i', $link)) ||
+                                            ($type === 'box' && strpos($link, 'box.com') !== false);
+                            if ($matches_type) {
+                                $results[] = [
+                                    'Location Type' => ($obj = get_post_type_object($post->post_type)) ? $obj->labels->singular_name . ' (ACF Field)' : ucfirst($post->post_type) . ' (ACF Field)',
+                                    'Title'         => get_the_title($post) . " (Field: $field_key)",
+                                    'Link'          => $link,
+                                    'URL'           => get_permalink($post),
+                                ];
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -208,7 +272,7 @@ function scan_links_and_generate_csv($type)
     // Prepare CSV file path and URL
     $upload_dir = wp_upload_dir();
     $site_slug = sanitize_title($site->blogname);
-    $file_name = 'link-scan-' . $site_slug . '-' . $type . '-' . time() . '.csv';
+    $file_name = $site_slug . '-' . $type . '-' . time() . '.csv';
     $file_path = trailingslashit($upload_dir['basedir']) . $file_name;
     $file_url = trailingslashit($upload_dir['baseurl']) . $file_name;
 
