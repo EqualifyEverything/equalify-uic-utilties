@@ -33,6 +33,8 @@ function render_link_scanner_page()
         return;
     }
 
+    // Removed setcookie call here as per instructions
+
     // Handle deletion of reports via nonce-verified request
     if (isset($_GET['delete_report']) && isset($_GET['_wpnonce']) && wp_verify_nonce($_GET['_wpnonce'], 'delete_report')) {
         $target_file = basename($_GET['delete_report']);
@@ -60,32 +62,62 @@ function render_link_scanner_page()
         }
     }
 
-    $download_url = '';
-    $selected_site = isset($_POST['site_id']) ? (int) $_POST['site_id'] : get_current_blog_id();
-
+    $selected_site = get_current_blog_id();
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['site_id'])) {
+        $selected_site = (int) $_POST['site_id'];
+        if (!headers_sent()) {
+            setcookie('uic_selected_site', $selected_site, time() + 3600 * 24 * 30, COOKIEPATH, COOKIE_DOMAIN, is_ssl());
+        }
+    } elseif (isset($_COOKIE['uic_selected_site'])) {
+        $selected_site = (int) $_COOKIE['uic_selected_site'];
+    }
+    
     // Unified POST and nonce logic for bulk and scan actions
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        if ((isset($_POST['download_all_reports']) || isset($_POST['delete_all_reports'])) && check_admin_referer('bulk_report_action')) {
-            if (isset($_POST['download_all_reports'])) {
-                $zip = new ZipArchive();
-                $zip_name = 'all-link-reports-' . time() . '.zip';
+        if ((isset($_POST['combine_all_reports']) || isset($_POST['delete_all_reports'])) && check_admin_referer('bulk_report_action')) {
+            if (isset($_POST['combine_all_reports'])) {
                 $upload_dir = wp_upload_dir();
-                $zip_path = trailingslashit($upload_dir['basedir']) . $zip_name;
-                $zip_url = trailingslashit($upload_dir['baseurl']) . $zip_name;
-
-                if ($zip->open($zip_path, ZipArchive::CREATE) === TRUE) {
-                    foreach (get_sites(['public' => 1]) as $site) {
-                        switch_to_blog($site->blog_id);
-                        $site_name = sanitize_title(get_blog_details($site->blog_id)->blogname);
-                        $files = glob(trailingslashit(wp_upload_dir()['basedir']) . '*.csv') ?: [];
-                        foreach ($files as $file) {
-                            $zip->addFile($file, $site_name . '/' . basename($file));
-                        }
-                        restore_current_blog();
-                    }
-                    $zip->close();
-                    echo '<div class="notice notice-success"><p>Zip of reports generated. <a href="' . esc_url($zip_url) . '">Download All Reports</a></p></div>';
+                $merged_csv_path = trailingslashit($upload_dir['basedir']) . 'combined-link-reports.csv';
+                $merged_csv_url = trailingslashit($upload_dir['baseurl']) . 'combined-link-reports.csv';
+                $output = @fopen($merged_csv_path, 'w');
+                if ($output === false) {
+                    echo '<div class="notice notice-error"><p>Failed to create the combined report file.</p></div>';
+                    return;
                 }
+                register_shutdown_function(function () use ($output) {
+                    if (is_resource($output)) {
+                        fclose($output);
+                    }
+                });
+                fputcsv($output, ['Site Name', 'Site ID', 'Link Type', 'Location Type', 'Title', 'Link', 'URL']);
+                $sites = get_sites(['public' => 1]);
+                $found_any_files = false;
+                foreach ($sites as $site) {
+                    switch_to_blog($site->blog_id);
+                    $site_name = get_blog_details($site->blog_id)->blogname;
+                    $site_id = $site->blog_id;
+                    $files = array_filter(
+                        glob(trailingslashit(wp_upload_dir()['basedir']) . '*.csv') ?: [],
+                        fn($file) => strpos(basename($file), 'combined-link-reports-') === false
+                    );
+                    if (!empty($files)) {
+                        $found_any_files = true;
+                        foreach ($files as $file) {
+                            $handle = fopen($file, 'r');
+                            if ($handle !== false) {
+                                $header = fgetcsv($handle); // skip original header
+                                while (($data = fgetcsv($handle)) !== false) {
+                                    $report_type = (stripos($file, '-pdf-') !== false) ? 'PDF' : ((stripos($file, '-box-') !== false) ? 'Box' : 'Unknown');
+                                    fputcsv($output, array_merge([$site_name, $site_id, $report_type], $data));
+                                }
+                                fclose($handle);
+                            }
+                        }
+                    }
+                    restore_current_blog();
+                }
+                fclose($output);
+                echo '<div class="notice notice-success"><p>Reports sucessfully combined. <a href="' . esc_url($merged_csv_url) . '" download>Download CSV</a></p></div>';
             }
             if (isset($_POST['delete_all_reports'])) {
                 foreach (get_sites(['public' => 1]) as $site) {
@@ -122,7 +154,7 @@ function render_link_scanner_page()
             <select name="site_id" id="site_id">
                 <?php foreach ($sites as $site) {
                     $blog_details = get_blog_details($site->blog_id);
-                    $selected = ($site->blog_id === $selected_site) ? 'selected' : '';
+                    $selected = ((int) $site->blog_id === (int) $selected_site) ? 'selected' : '';
                     echo "<option value='{$site->blog_id}' $selected>" . esc_html($blog_details->blogname) . "</option>";
                 } ?>
             </select>
@@ -141,7 +173,10 @@ function render_link_scanner_page()
         foreach ($sites as $site) {
             switch_to_blog($site->blog_id);
             $upload_dir = wp_upload_dir();
-            $files = glob(trailingslashit($upload_dir['basedir']) . '*.csv') ?: [];
+            $files = array_filter(
+                glob(trailingslashit($upload_dir['basedir']) . '*.csv') ?: [],
+                fn($file) => strpos(basename($file), 'combined-link-reports.csv') === false
+            );
 
             foreach ($files as $file_path) {
                 $all_reports[] = [
@@ -153,10 +188,7 @@ function render_link_scanner_page()
             }
             restore_current_blog();
         }
-
-        // Sort reports by file name descending (newest first)
-        usort($all_reports, fn($a, $b) => strcmp($b['file_name'], $a['file_name']));
-
+        
         // Display each report with download and delete links
         foreach ($all_reports as $report) {
             echo '<li>' . esc_html($report['file_name']) . ' (' . esc_html($report['site']) . ') - <a href="' . esc_url($report['file_url']) . '">Download</a> | <a href="' . esc_url($report['delete_url']) . '">Delete</a></li>';
@@ -166,7 +198,7 @@ function render_link_scanner_page()
         <?php if (!empty($all_reports)) : ?>
             <form method="post" style="margin-top: 1em;">
                 <?php wp_nonce_field('bulk_report_action'); ?>
-                <input type="submit" name="download_all_reports" class="button" value="Zip All Reports">
+                <input type="submit" name="combine_all_reports" class="button" value="Combine All Reports">
                 <input type="submit" name="delete_all_reports" class="button" value="Delete All Reports" onclick="return confirm('Are you sure you want to delete all reports?');">
             </form>
         <?php endif; ?>
