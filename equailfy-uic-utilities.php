@@ -2,7 +2,7 @@
 /*
 Plugin Name: Equalify + UIC Network Utilities
 Description: Scans content for PDF and Box.com links and exports CSV. Network-enabled.
-Version: 1.1
+Version: 1.2
 Author: Blake Bertuccelli-Booth (UIC)
 Network: true
 */
