@@ -2,7 +2,7 @@
 /*
 Plugin Name: Equalify + UIC Network Utilities
 Description: Scans content for PDF and Box.com links and exports CSV. Network-enabled.
-Version: 1.3
+Version: 1.4
 Author: Blake Bertuccelli-Booth (UIC)
 Network: true
 */
@@ -216,6 +216,9 @@ function scan_links_and_generate_csv($type)
 {
     $results = [];
 
+    // Global deduplication array for all post and ACF links
+    $global_seen_links = [];
+
     // Get current site details for naming the CSV
     $site = get_blog_details();
     error_log("Scanning site: " . $site->blogname . " (ID: " . get_current_blog_id() . ")");
@@ -231,6 +234,7 @@ function scan_links_and_generate_csv($type)
 
     $query = new WP_Query($args);
     while ($query->have_posts()) {
+        // Loop through posts
         foreach ($query->posts as $post) {
             $content = $post->post_content;
 
@@ -238,14 +242,16 @@ function scan_links_and_generate_csv($type)
             preg_match_all('/href=[\'"]([^\'"]+)[\'"]/i', $content, $matches);
 
             foreach ($matches[1] as $link) {
-                $matches_type = ($type === 'pdf' && preg_match('/\.pdf(\?.*)?$/i', $link)) ||
-                                ($type === 'box' && strpos($link, 'box.com') !== false);
+                $normalized = trim($link);
+                $matches_type = ($type === 'pdf' && preg_match('/\.pdf(\?.*)?$/i', $normalized)) ||
+                                ($type === 'box' && strpos($normalized, 'box.com') !== false);
 
-                if ($matches_type) {
+                if ($matches_type && !isset($global_seen_links[$normalized])) {
+                    $global_seen_links[$normalized] = true;
                     $results[] = [
                         'Location Type' => ($obj = get_post_type_object($post->post_type)) ? $obj->labels->singular_name : ucfirst($post->post_type),
                         'Title'         => get_the_title($post),
-                        'Link'          => $link,
+                        'Link'          => $normalized,
                         'URL'           => get_permalink($post),
                     ];
                 }
@@ -259,13 +265,15 @@ function scan_links_and_generate_csv($type)
                         if (is_string($field_value)) {
                             preg_match_all('/https?:\/\/[^\s"\']+/i', $field_value, $acf_matches);
                             foreach ($acf_matches[0] as $link) {
-                                $matches_type = ($type === 'pdf' && preg_match('/\.pdf(\?.*)?$/i', $link)) ||
-                                                ($type === 'box' && strpos($link, 'box.com') !== false);
-                                if ($matches_type) {
+                                $normalized = trim($link);
+                                $matches_type = ($type === 'pdf' && preg_match('/\.pdf(\?.*)?$/i', $normalized)) ||
+                                                ($type === 'box' && strpos($normalized, 'box.com') !== false);
+                                if ($matches_type && !isset($global_seen_links[$normalized])) {
+                                    $global_seen_links[$normalized] = true;
                                     $results[] = [
                                         'Location Type' => ($obj = get_post_type_object($post->post_type)) ? $obj->labels->singular_name . ' (ACF Field)' : ucfirst($post->post_type) . ' (ACF Field)',
                                         'Title'         => get_the_title($post) . " (Field: $field_key)",
-                                        'Link'          => $link,
+                                        'Link'          => $normalized,
                                         'URL'           => get_permalink($post),
                                     ];
                                 }
@@ -286,20 +294,24 @@ function scan_links_and_generate_csv($type)
     $menus = wp_get_nav_menus();
     error_log("Menu count found: " . count($menus));
 
+    $seen_links = [];
+
     foreach ($menus as $menu) {
         $items = wp_get_nav_menu_items($menu);
 
         if (!empty($items)) {
             foreach ($items as $item) {
                 $link = $item->url;
-                $matches_type = ($type === 'pdf' && preg_match('/\.pdf(\?.*)?$/i', $link)) ||
-                                ($type === 'box' && strpos($link, 'box.com') !== false);
+                $normalized = trim($link);
+                $matches_type = ($type === 'pdf' && preg_match('/\.pdf(\?.*)?$/i', $normalized)) ||
+                                ($type === 'box' && strpos($normalized, 'box.com') !== false);
 
-                if ($matches_type) {
+                if ($matches_type && !isset($seen_links[$normalized])) {
+                    $seen_links[$normalized] = true;
                     $results[] = [
                         'Location Type' => 'Menu',
                         'Title'         => $item->title,
-                        'Link'          => $link,
+                        'Link'          => $normalized,
                         'URL'           => '',
                     ];
                 }
