@@ -2,7 +2,7 @@
 /*
 Plugin Name: Equalify + UIC Network Utilities
 Description: Scans content for PDF and Box.com links and exports CSV. Network-enabled.
-Version: 1.2
+Version: 1.3
 Author: Blake Bertuccelli-Booth (UIC)
 Network: true
 */
@@ -216,65 +216,71 @@ function scan_links_and_generate_csv($type)
 {
     $results = [];
 
-    // Retrieve all published posts of any type
-    $args = [
-        'post_type'      => 'any',
-        'post_status'    => 'publish',
-        'posts_per_page' => -1,
-    ];
-    $posts = get_posts($args);
-
-    error_log("Post count found: " . count($posts));
-
     // Get current site details for naming the CSV
     $site = get_blog_details();
     error_log("Scanning site: " . $site->blogname . " (ID: " . get_current_blog_id() . ")");
 
-    // Search post content for matching links
-    foreach ($posts as $post) {
-        $content = $post->post_content;
+    // Paginated loop for posts using WP_Query
+    $paged = 1;
+    $args = [
+        'post_type'      => 'any',
+        'post_status'    => 'publish',
+        'posts_per_page' => 100,
+        'paged'          => $paged,
+    ];
 
-        // Extract all href links from post content
-        preg_match_all('/href=[\'"]([^\'"]+)[\'"]/i', $content, $matches);
+    $query = new WP_Query($args);
+    while ($query->have_posts()) {
+        foreach ($query->posts as $post) {
+            $content = $post->post_content;
 
-        foreach ($matches[1] as $link) {
-            $matches_type = ($type === 'pdf' && preg_match('/\.pdf(\?.*)?$/i', $link)) ||
-                            ($type === 'box' && strpos($link, 'box.com') !== false);
+            // Extract all href links from post content
+            preg_match_all('/href=[\'"]([^\'"]+)[\'"]/i', $content, $matches);
 
-            if ($matches_type) {
-                $results[] = [
-                    'Location Type' => ($obj = get_post_type_object($post->post_type)) ? $obj->labels->singular_name : ucfirst($post->post_type),
-                    'Title'         => get_the_title($post),
-                    'Link'          => $link,
-                    'URL'           => get_permalink($post),
-                ];
+            foreach ($matches[1] as $link) {
+                $matches_type = ($type === 'pdf' && preg_match('/\.pdf(\?.*)?$/i', $link)) ||
+                                ($type === 'box' && strpos($link, 'box.com') !== false);
+
+                if ($matches_type) {
+                    $results[] = [
+                        'Location Type' => ($obj = get_post_type_object($post->post_type)) ? $obj->labels->singular_name : ucfirst($post->post_type),
+                        'Title'         => get_the_title($post),
+                        'Link'          => $link,
+                        'URL'           => get_permalink($post),
+                    ];
+                }
             }
-        }
 
-        // Check ACF fields for matching links
-        if (function_exists('get_fields')) {
-            $fields = get_fields($post->ID);
-            if ($fields && is_array($fields)) {
-                foreach ($fields as $field_key => $field_value) {
-                    if (is_string($field_value)) {
-                        preg_match_all('/https?:\/\/[^\s"\']+/i', $field_value, $acf_matches);
-                        foreach ($acf_matches[0] as $link) {
-                            $matches_type = ($type === 'pdf' && preg_match('/\.pdf(\?.*)?$/i', $link)) ||
-                                            ($type === 'box' && strpos($link, 'box.com') !== false);
-                            if ($matches_type) {
-                                $results[] = [
-                                    'Location Type' => ($obj = get_post_type_object($post->post_type)) ? $obj->labels->singular_name . ' (ACF Field)' : ucfirst($post->post_type) . ' (ACF Field)',
-                                    'Title'         => get_the_title($post) . " (Field: $field_key)",
-                                    'Link'          => $link,
-                                    'URL'           => get_permalink($post),
-                                ];
+            // Check ACF fields for matching links
+            if (function_exists('get_fields')) {
+                $fields = get_fields($post->ID);
+                if ($fields && is_array($fields)) {
+                    foreach ($fields as $field_key => $field_value) {
+                        if (is_string($field_value)) {
+                            preg_match_all('/https?:\/\/[^\s"\']+/i', $field_value, $acf_matches);
+                            foreach ($acf_matches[0] as $link) {
+                                $matches_type = ($type === 'pdf' && preg_match('/\.pdf(\?.*)?$/i', $link)) ||
+                                                ($type === 'box' && strpos($link, 'box.com') !== false);
+                                if ($matches_type) {
+                                    $results[] = [
+                                        'Location Type' => ($obj = get_post_type_object($post->post_type)) ? $obj->labels->singular_name . ' (ACF Field)' : ucfirst($post->post_type) . ' (ACF Field)',
+                                        'Title'         => get_the_title($post) . " (Field: $field_key)",
+                                        'Link'          => $link,
+                                        'URL'           => get_permalink($post),
+                                    ];
+                                }
                             }
                         }
                     }
                 }
             }
         }
+
+        $paged++;
+        $args['paged'] = $paged;
+        $query = new WP_Query($args);
     }
+    wp_reset_postdata();
 
     // Search menu items for matching links
     $menus = wp_get_nav_menus();
