@@ -1,8 +1,8 @@
 <?php
 /*
 Plugin Name: Equalify + UIC Network Utilities
-Description: Scans content for PDF and Box.com links and exports CSV. Network-enabled.
-Version: 1.7
+Description: Scans for public PDF, Box.com, and site URLs. Network-enabled.
+Version: 1.8
 Author: Blake Bertuccelli-Booth (UIC)
 Network: true
 */
@@ -140,7 +140,7 @@ function render_link_scanner_page()
     <div class="wrap">
         <h1>UIC + Equalify Utilities</h1>
         <h3>Network Scan</h3>
-        <p>Scan all sites for PDF and Box links. This will schedule scans to run in the background.</p>
+        <p>Scans for public PDF, Box.com, and site URLs. This will schedule scans to run in the background.</p>
         <?php if ($is_scan_scheduled): ?>
             <div class="notice notice-info"><p>A full network scan is currently scheduled or in progress.</p></div>
             <form method="post">
@@ -158,6 +158,8 @@ function render_link_scanner_page()
         <?php
         // List all unique scan_id and timestamp
         $scans = $wpdb->get_results("SELECT scan_id, MIN(timestamp) as ts, COUNT(*) as count FROM $table_name GROUP BY scan_id ORDER BY ts DESC", ARRAY_A);
+        // Get current network scan ID (in-progress scan)
+        $current_network_scan_id = get_site_option('uic_equalify_current_scan_id');
         if ($scans): ?>
             <table class="widefat fixed striped">
                 <thead>
@@ -179,18 +181,24 @@ function render_link_scanner_page()
                         // CSV generation/download button logic
                         $upload_dir = wp_upload_dir();
                         $csv_path = $upload_dir['basedir'] . "/scan_" . $scan['scan_id'] . ".csv";
-                        if (file_exists($csv_path)) {
-                            $csv_url = $upload_dir['baseurl'] . "/scan_" . $scan['scan_id'] . ".csv";
-                            echo '<a class="button button-small" href="' . esc_url($csv_url) . '">Download CSV</a> ';
+                        if ($scan['scan_id'] === $current_network_scan_id && $current_network_scan_id) {
+                            // If currently scanning, only show disabled button
+                            echo '<button class="button button-small" disabled>Currently Scanning</button> ';
                         } else {
-                            echo '<form method="post" style="display:inline;">';
-                            wp_nonce_field('generate_csv_' . $scan['scan_id']);
-                            echo '<input type="hidden" name="generate_csv" value="' . esc_attr($scan['scan_id']) . '">';
-                            echo '<input type="submit" class="button button-small" value="Generate CSV">';
-                            echo '</form>';
+                            // Not currently scanning: show CSV actions and Delete
+                            if (file_exists($csv_path)) {
+                                $csv_url = $upload_dir['baseurl'] . "/scan_" . $scan['scan_id'] . ".csv";
+                                echo '<a class="button button-small" href="' . esc_url($csv_url) . '">Download CSV</a> ';
+                            } else {
+                                echo '<form method="post" style="display:inline;">';
+                                wp_nonce_field('generate_csv_' . $scan['scan_id']);
+                                echo '<input type="hidden" name="generate_csv" value="' . esc_attr($scan['scan_id']) . '">';
+                                echo '<input type="submit" class="button button-small" value="Generate CSV">';
+                                echo '</form>';
+                            }
+                            echo '<a class="button button-small" href="' . esc_url(wp_nonce_url(add_query_arg(['delete_scan' => $scan['scan_id']]), 'delete_scan_' . $scan['scan_id'])) . '" onclick="return confirm(\'Delete this scan and all results?\');">Delete</a>';
                         }
                         ?>
-                        <a class="button button-small" href="<?php echo esc_url(wp_nonce_url(add_query_arg(['delete_scan' => $scan['scan_id']]), 'delete_scan_' . $scan['scan_id'])); ?>" onclick="return confirm('Delete this scan and all results?');">Delete</a>
                         </td>
                     </tr>
                 <?php endforeach; ?>
@@ -412,6 +420,63 @@ function scan_links($scan_id = null)
         $sql = "INSERT INTO $table_name (scan_id, timestamp, link_type, location_type, title, link, url) VALUES " . implode(',', $placeholders);
         $wpdb->query($wpdb->prepare($sql, ...$values));
     }
+
+    // --- Add "Public URL" rows for all public posts, even if no PDF/Box links ---
+    $public_rows = [];
+    $batch_size = 100;
+    $post_types = get_post_types(['public' => true]);
+    foreach ($post_types as $type) {
+        $paged = 1;
+        $args = [
+            'post_type'      => $type,
+            'post_status'    => 'publish',
+            'posts_per_page' => 100,
+            'paged'          => $paged,
+            'fields'         => 'ids',
+        ];
+        do {
+            $query = new WP_Query($args);
+            foreach ($query->posts as $post_id) {
+                $post = get_post($post_id);
+                $row = [
+                    'scan_id'       => $scan_id,
+                    'timestamp'     => $timestamp,
+                    'link_type'     => 'Public URL',
+                    'location_type' => ($obj = get_post_type_object($post->post_type)) ? $obj->labels->singular_name : ucfirst($post->post_type),
+                    'title'         => get_the_title($post),
+                    'link'          => '',
+                    'url'           => get_permalink($post),
+                ];
+                $public_rows[] = $row;
+                if (count($public_rows) >= $batch_size) {
+                    $values = [];
+                    $placeholders = [];
+                    foreach ($public_rows as $b_row) {
+                        $values = array_merge($values, array_values($b_row));
+                        $placeholders[] = '(' . implode(',', array_fill(0, count($b_row), '%s')) . ')';
+                    }
+                    $sql = "INSERT INTO $table_name (scan_id, timestamp, link_type, location_type, title, link, url) VALUES " . implode(',', $placeholders);
+                    $wpdb->query($wpdb->prepare($sql, ...$values));
+                    $public_rows = [];
+                }
+            }
+            $paged++;
+            $args['paged'] = $paged;
+        } while ($query->have_posts());
+        wp_reset_postdata();
+    }
+    // Insert any remaining public rows
+    if (!empty($public_rows)) {
+        $values = [];
+        $placeholders = [];
+        foreach ($public_rows as $b_row) {
+            $values = array_merge($values, array_values($b_row));
+            $placeholders[] = '(' . implode(',', array_fill(0, count($b_row), '%s')) . ')';
+        }
+        $sql = "INSERT INTO $table_name (scan_id, timestamp, link_type, location_type, title, link, url) VALUES " . implode(',', $placeholders);
+        $wpdb->query($wpdb->prepare($sql, ...$values));
+    }
+
     return $scan_id;
 }
 
@@ -467,6 +532,20 @@ function uic_handle_site_scan($site_id) {
     $scan_id = get_site_option('uic_equalify_current_scan_id');
     scan_links($scan_id);
     restore_current_blog();
+
+    // After restoring blog, check if any scheduled scans remain across all sites
+    $sites = uic_get_all_sites_cached();
+    $any_scheduled = false;
+    foreach ($sites as $site) {
+        if (wp_next_scheduled('uic_scan_site_links_event', [$site->blog_id])) {
+            $any_scheduled = true;
+            break;
+        }
+    }
+    if (!$any_scheduled) {
+        // No more scheduled scans, clear scan status
+        delete_site_option('uic_equalify_current_scan_id');
+    }
 }
 // -- CSV generation event for scan results --
 add_action('uic_generate_csv_event', 'uic_generate_csv_for_scan');
