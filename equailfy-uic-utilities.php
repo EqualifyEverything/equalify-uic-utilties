@@ -131,7 +131,7 @@ function render_link_scanner_page()
     <div class="wrap">
         <h1>UIC + Equalify Utilities</h1>
         <h3>Network Scan</h3>
-        <p>Scans for public PDF, Box.com, and site URLs. This will schedule scans to run in the background.</p>
+        <p>Scans for public PDFs and site URLs. This will schedule scans to run in the background.</p>
         <?php if ($is_scan_scheduled): ?>
             <div class="notice notice-info">
                 <p>
