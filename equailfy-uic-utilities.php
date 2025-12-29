@@ -106,11 +106,22 @@ function render_link_scanner_page()
         }
     }
     if (isset($_POST['stop_all_scans']) && check_admin_referer('uic_stop_all_scans')) {
+        $current_scan_id = get_site_option('uic_equalify_current_scan_id');
         foreach ($sites as $site) {
             $timestamp = wp_next_scheduled('uic_scan_site_links_event', [$site->blog_id]);
             if ($timestamp) {
                 wp_unschedule_event($timestamp, 'uic_scan_site_links_event', [$site->blog_id]);
             }
+        }
+        if ($current_scan_id) {
+            // Remove partial results and any CSV for the canceled scan
+            $wpdb->delete($table_name, ['scan_id' => $current_scan_id]);
+            $upload_dir = wp_upload_dir();
+            $csv_path = $upload_dir['basedir'] . "/scan_" . $current_scan_id . ".csv";
+            if (file_exists($csv_path)) {
+                unlink($csv_path);
+            }
+            delete_site_option('uic_equalify_current_scan_id');
         }
         echo '<div class="notice notice-success"><p>All scheduled scans have been cancelled.</p></div>';
         $is_scan_scheduled = false;
