@@ -2,7 +2,7 @@
 /*
 Plugin Name: Equalify + UIC Network Utilities
 Description: Scans for public PDF, Box.com, and site URLs. Network-enabled.
-Version: 1.8
+Version: 1.9
 Author: Blake Bertuccelli-Booth (UIC)
 Network: true
 */
@@ -78,9 +78,13 @@ function render_link_scanner_page()
             header('Content-Type: text/csv');
             header('Content-Disposition: attachment; filename="scan_' . $scan_id . '.csv"');
             $out = fopen('php://output', 'w');
-            fputcsv($out, ['Link Type', 'Location Type', 'Title', 'Link', 'URL']);
+            fputcsv($out, ['url', 'type']);
             foreach ($rows as $row) {
-                fputcsv($out, [$row['link_type'], $row['location_type'], $row['title'], $row['link'], $row['url']]);
+                $csv_row = uic_format_scan_row_for_csv($row);
+                if ($csv_row === null) {
+                    continue;
+                }
+                fputcsv($out, array_values($csv_row));
             }
             fclose($out);
             exit;
@@ -118,11 +122,13 @@ function render_link_scanner_page()
 
     // --- Begin: Scheduled scan detection and stop logic ---
     $sites = uic_get_all_sites_cached();
+    $total_sites = is_array($sites) ? count($sites) : 0;
+    $pending_sites = 0;
     $is_scan_scheduled = false;
     foreach ($sites as $site) {
         if (wp_next_scheduled('uic_scan_site_links_event', [$site->blog_id])) {
             $is_scan_scheduled = true;
-            break;
+            $pending_sites++;
         }
     }
     if (isset($_POST['stop_all_scans']) && check_admin_referer('uic_stop_all_scans')) {
@@ -142,7 +148,15 @@ function render_link_scanner_page()
         <h3>Network Scan</h3>
         <p>Scans for public PDF, Box.com, and site URLs. This will schedule scans to run in the background.</p>
         <?php if ($is_scan_scheduled): ?>
-            <div class="notice notice-info"><p>A full network scan is currently scheduled or in progress.</p></div>
+            <div class="notice notice-info">
+                <p>
+                    A full network scan is currently scheduled or in progress.
+                    <?php if ($total_sites > 0): ?>
+                        <?php echo esc_html($pending_sites); ?> of <?php echo esc_html($total_sites); ?> sites remain to be scanned.
+                    <?php endif; ?>
+                    Refresh this page to see the latest progress.
+                </p>
+            </div>
             <form method="post">
                 <?php wp_nonce_field('uic_stop_all_scans'); ?>
                 <input type="submit" name="stop_all_scans" class="button button-secondary" value="Stop Network Scan">
@@ -260,6 +274,9 @@ function scan_links($scan_id = null)
             $query = new WP_Query($args);
             foreach ($query->posts as $post_id) {
                 $post = get_post($post_id);
+                if (!$post || $post->post_status !== 'publish' || !empty($post->post_password)) {
+                    continue;
+                }
                 $content = $post->post_content;
                 preg_match_all('/href=[\'"]([^\'"]+)[\'"]/i', $content, $matches);
                 foreach ($matches[1] as $link) {
@@ -438,6 +455,9 @@ function scan_links($scan_id = null)
             $query = new WP_Query($args);
             foreach ($query->posts as $post_id) {
                 $post = get_post($post_id);
+                if (!$post || $post->post_status !== 'publish' || !empty($post->post_password)) {
+                    continue;
+                }
                 $row = [
                     'scan_id'       => $scan_id,
                     'timestamp'     => $timestamp,
@@ -547,6 +567,36 @@ function uic_handle_site_scan($site_id) {
         delete_site_option('uic_equalify_current_scan_id');
     }
 }
+
+/**
+ * Normalize a stored scan row into the simplified CSV shape.
+ *
+ * @param array $row
+ * @return array|null
+ */
+function uic_format_scan_row_for_csv(array $row) {
+    $link_type = strtolower($row['link_type'] ?? '');
+    if ($link_type === 'pdf') {
+        $url = isset($row['link']) ? trim($row['link']) : '';
+        $sanitized_url = esc_url_raw($url);
+        if ($sanitized_url === '') {
+            return null;
+        }
+        return ['url' => $sanitized_url, 'type' => 'pdf'];
+    }
+
+    if ($link_type === 'public url') {
+        $url = isset($row['url']) ? trim($row['url']) : '';
+        $sanitized_url = esc_url_raw($url);
+        if ($sanitized_url === '') {
+            return null;
+        }
+        return ['url' => $sanitized_url, 'type' => 'html'];
+    }
+
+    // Skip private or unsupported link types (e.g., Box or admin URLs).
+    return null;
+}
 // -- CSV generation event for scan results --
 add_action('uic_generate_csv_event', 'uic_generate_csv_for_scan');
 
@@ -556,7 +606,10 @@ function uic_generate_csv_for_scan($scan_id) {
     $upload_dir = wp_upload_dir();
     $csv_path = $upload_dir['basedir'] . "/scan_$scan_id.csv";
     $out = fopen($csv_path, 'w');
-    fputcsv($out, ['Link Type', 'Location Type', 'Title', 'Link', 'URL']);
+    if ($out === false) {
+        return;
+    }
+    fputcsv($out, ['url', 'type']);
 
     $offset = 0;
     $limit = 500;
@@ -567,7 +620,11 @@ function uic_generate_csv_for_scan($scan_id) {
         );
         if (empty($rows)) break;
         foreach ($rows as $row) {
-            fputcsv($out, [$row['link_type'], $row['location_type'], $row['title'], $row['link'], $row['url']]);
+            $csv_row = uic_format_scan_row_for_csv($row);
+            if ($csv_row === null) {
+                continue;
+            }
+            fputcsv($out, array_values($csv_row));
         }
         $offset += $limit;
     }
