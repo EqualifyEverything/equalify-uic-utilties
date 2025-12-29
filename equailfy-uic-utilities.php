@@ -1,7 +1,7 @@
 <?php
 /*
 Plugin Name: Equalify + UIC Network Utilities
-Description: Scans for public PDF, Box.com, and site URLs. Network-enabled.
+Description: Scans for public PDF and site URLs. Network-enabled.
 Version: 1.9
 Author: Blake Bertuccelli-Booth (UIC)
 Network: true
@@ -64,32 +64,6 @@ function render_link_scanner_page()
         if (!wp_next_scheduled('uic_generate_csv_event', [$scan_id])) {
             wp_schedule_single_event(time(), 'uic_generate_csv_event', [$scan_id]);
             echo '<div class="notice notice-info"><p>CSV generation scheduled. Refresh shortly to download.</p></div>';
-        }
-    }
-
-    // Handle CSV download (legacy, not used with new CSV file, but kept for backward compat)
-    if (isset($_GET['download_scan']) && isset($_GET['_wpnonce']) && wp_verify_nonce($_GET['_wpnonce'], 'download_scan_' . $_GET['download_scan'])) {
-        $scan_id = sanitize_text_field($_GET['download_scan']);
-        $rows = $wpdb->get_results($wpdb->prepare("SELECT * FROM $table_name WHERE scan_id = %s ORDER BY id ASC", $scan_id), ARRAY_A);
-        if ($rows) {
-            if (ob_get_length()) {
-                ob_end_clean();
-            }
-            header('Content-Type: text/csv');
-            header('Content-Disposition: attachment; filename="scan_' . $scan_id . '.csv"');
-            $out = fopen('php://output', 'w');
-            fputcsv($out, ['url', 'type']);
-            foreach ($rows as $row) {
-                $csv_row = uic_format_scan_row_for_csv($row);
-                if ($csv_row === null) {
-                    continue;
-                }
-                fputcsv($out, array_values($csv_row));
-            }
-            fclose($out);
-            exit;
-        } else {
-            echo '<div class="notice notice-error"><p>No scan results found for this scan.</p></div>';
         }
     }
 
@@ -180,7 +154,7 @@ function render_link_scanner_page()
                     <tr>
                         <th>Scan ID</th>
                         <th>Date</th>
-                        <th>Results</th>
+                        <th>Items</th>
                         <th>Actions</th>
                     </tr>
                 </thead>
@@ -244,7 +218,7 @@ function uic_get_all_sites_cached() {
 }
 
 /**
- * Scan posts and menus for PDF and Box links and store results in DB.
+ * Scan posts and menus for PDFs and store results in DB.
  *
  * @return string scan_id
  */
@@ -283,8 +257,6 @@ function scan_links($scan_id = null)
                     $normalized = trim($link);
                     if (preg_match('/\.pdf(\?.*)?$/i', $normalized)) {
                         $link_type = 'PDF';
-                    } elseif (strpos($normalized, 'box.com') !== false) {
-                        $link_type = 'Box';
                     } else {
                         continue;
                     }
@@ -329,8 +301,6 @@ function scan_links($scan_id = null)
                                     $normalized = trim($link);
                                     if (preg_match('/\.pdf(\?.*)?$/i', $normalized)) {
                                         $link_type = 'PDF';
-                                    } elseif (strpos($normalized, 'box.com') !== false) {
-                                        $link_type = 'Box';
                                     } else {
                                         continue;
                                     }
@@ -394,8 +364,6 @@ function scan_links($scan_id = null)
                 $normalized = trim($link);
                 if (preg_match('/\.pdf(\?.*)?$/i', $normalized)) {
                     $link_type = 'PDF';
-                } elseif (strpos($normalized, 'box.com') !== false) {
-                    $link_type = 'Box';
                 } else {
                     continue;
                 }
