@@ -291,7 +291,8 @@ function render_link_scanner_page()
         if ($is_network_context) {
             $scans = $wpdb->get_results("SELECT scan_id, MIN(timestamp) as ts, COUNT(*) as count FROM $table_name GROUP BY scan_id ORDER BY ts DESC", ARRAY_A);
         } else {
-            $scans = $wpdb->get_results($wpdb->prepare("SELECT scan_id, MIN(timestamp) as ts, COUNT(*) as count FROM $table_name WHERE site_id = %d GROUP BY scan_id ORDER BY ts DESC", $current_site_id), ARRAY_A);
+            // Single-site view: only show site-specific scans, hide network scans.
+            $scans = $wpdb->get_results($wpdb->prepare("SELECT scan_id, MIN(timestamp) as ts, COUNT(*) as count FROM $table_name WHERE site_id = %d AND scan_id NOT LIKE %s GROUP BY scan_id ORDER BY ts DESC", $current_site_id, 'scan_network_%'), ARRAY_A);
         }
         $has_pending_csv = false;
         // Get current scan ID (in-progress scan)
@@ -317,7 +318,9 @@ function render_link_scanner_page()
                         // CSV generation/download button logic
                         $upload_dir = wp_upload_dir();
                         $csv_path = $upload_dir['basedir'] . "/scan_" . $scan['scan_id'] . ".csv";
-                        if ($scan['scan_id'] === $current_scan_indicator && $current_scan_indicator) {
+                        $is_current_scan = ($scan['scan_id'] === $current_scan_indicator && $current_scan_indicator);
+                        $csv_job_scheduled = (bool) wp_next_scheduled('uic_generate_csv_event', [$scan['scan_id']]);
+                        if ($is_current_scan) {
                             // If currently scanning, only show disabled button
                             echo '<button class="button button-small" disabled>Currently Scanning</button> ';
                             $has_pending_csv = true;
@@ -327,7 +330,9 @@ function render_link_scanner_page()
                                 $csv_url = $upload_dir['baseurl'] . "/scan_" . $scan['scan_id'] . ".csv";
                                 echo '<a class="button button-small" href="' . esc_url($csv_url) . '">Download CSV</a> ';
                             } else {
-                                $has_pending_csv = true;
+                                if ($csv_job_scheduled) {
+                                    $has_pending_csv = true;
+                                }
                                 echo '<form method="post" style="display:inline;">';
                                 wp_nonce_field('generate_csv_' . $scan['scan_id']);
                                 echo '<input type="hidden" name="generate_csv" value="' . esc_attr($scan['scan_id']) . '">';
