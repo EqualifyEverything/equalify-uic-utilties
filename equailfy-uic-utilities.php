@@ -271,7 +271,7 @@ function render_link_scanner_page()
                     <?php if ($total_sites > 0): ?>
                         <?php echo esc_html($pending_sites); ?> of <?php echo esc_html($total_sites); ?> <?php echo $is_network_context ? 'sites' : 'runs'; ?> remain to be scanned.
                     <?php endif; ?>
-                    Refresh this page to see the latest progress.
+                    <a href="<?php echo esc_url(add_query_arg([])); ?>">Refresh this page</a>
                 </p>
             </div>
             <form method="post">
