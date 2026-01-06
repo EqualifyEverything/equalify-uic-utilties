@@ -2,7 +2,7 @@
 /*
 Plugin Name: Equalify + UIC Network Utilities
 Description: Scans for public PDF and site URLs. Network or single-site.
-Version: 2.0
+Version: 2.0.1
 Author: Blake Bertuccelli-Booth (UIC)
 */
 
@@ -488,7 +488,7 @@ function scan_links($scan_id = null)
                                                 $values = array_merge($values, array_values($b_row));
                                                 $placeholders[] = '(' . implode(',', array_fill(0, count($b_row), '%s')) . ')';
                                             }
-                                            $sql = "INSERT INTO $table_name (scan_id, timestamp, link_type, location_type, title, link, url) VALUES " . implode(',', $placeholders);
+                                            $sql = "INSERT INTO $table_name (scan_id, site_id, timestamp, link_type, location_type, title, link, url) VALUES " . implode(',', $placeholders);
                                             $wpdb->query($wpdb->prepare($sql, ...$values));
                                             $batch_rows = [];
                                         }
