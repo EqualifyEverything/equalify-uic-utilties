@@ -2,7 +2,7 @@
 /*
 Plugin Name: Equalify + UIC Network Utilities
 Description: Scans for public PDF and site URLs. Network or single-site.
-Version: 2.0.1
+Version: 2.0.2
 Author: Blake Bertuccelli-Booth (UIC)
 */
 
@@ -12,7 +12,8 @@ Author: Blake Bertuccelli-Booth (UIC)
 add_action('network_admin_menu', 'uic_equalify_add_network_admin_menu');
 function uic_equalify_add_network_admin_menu()
 {
-    add_menu_page(
+    add_submenu_page(
+        'settings.php',
         'Equalify + UIC Utilities',
         'Equalify + UIC Utilities',
         'manage_network_options',
@@ -32,7 +33,8 @@ function uic_equalify_add_site_admin_menu()
         return;
     }
 
-    add_menu_page(
+    add_submenu_page(
+        'tools.php',
         'Equalify + UIC Utilities',
         'Equalify + UIC Utilities',
         'manage_options',
