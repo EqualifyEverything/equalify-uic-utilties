@@ -2,7 +2,7 @@
 /*
 Plugin Name: Equalify + UIC Network Utilities
 Description: Scans for public PDF and site URLs. Network or single-site.
-Version: 2.0.2
+Version: 2.0.3
 Author: Blake Bertuccelli-Booth (UIC)
 */
 
@@ -334,12 +334,15 @@ function render_link_scanner_page()
                             } else {
                                 if ($csv_job_scheduled) {
                                     $has_pending_csv = true;
+                                    echo '<button class="button button-small" disabled>Generating CSV...</button> ';
+                                } else {
+                                    echo '<form method="post" class="uic-generate-csv-form" style="display:inline;">';
+                                    wp_nonce_field('generate_csv_' . $scan['scan_id']);
+                                    echo '<input type="hidden" name="generate_csv" value="' . esc_attr($scan['scan_id']) . '">';
+                                    echo '<input type="submit" class="button button-small uic-generate-csv-button" value="Generate CSV" data-loading-text="Generating CSV..." aria-live="polite">';
+                                    echo '<span class="spinner" style="float:none; margin:0 0 0 6px;"></span>';
+                                    echo '</form>';
                                 }
-                                echo '<form method="post" style="display:inline;">';
-                                wp_nonce_field('generate_csv_' . $scan['scan_id']);
-                                echo '<input type="hidden" name="generate_csv" value="' . esc_attr($scan['scan_id']) . '">';
-                                echo '<input type="submit" class="button button-small" value="Generate CSV">';
-                                echo '</form>';
                             }
                             echo '<a class="button button-small" href="' . esc_url(wp_nonce_url(add_query_arg(['delete_scan' => $scan['scan_id']]), 'delete_scan_' . $scan['scan_id'])) . '" onclick="return confirm(\'Delete this scan and all results?\');">Delete</a>';
                         }
@@ -360,9 +363,31 @@ function render_link_scanner_page()
     <?php if ($is_scan_scheduled || $has_pending_csv): ?>
         <script>
             // Auto-refresh while scans or CSV generation are in progress
-            setTimeout(function() { location.reload(); }, 10000);
+            setTimeout(function() { location.reload(); }, 3000);
         </script>
     <?php endif; ?>
+    <script>
+        document.addEventListener('DOMContentLoaded', function() {
+            var forms = document.querySelectorAll('.uic-generate-csv-form');
+            forms.forEach(function(form) {
+                form.addEventListener('submit', function() {
+                    var button = form.querySelector('.uic-generate-csv-button');
+                    if (!button) {
+                        return;
+                    }
+                    button.disabled = true;
+                    var loadingText = button.getAttribute('data-loading-text');
+                    if (loadingText) {
+                        button.value = loadingText;
+                    }
+                    var spinner = form.querySelector('.spinner');
+                    if (spinner) {
+                        spinner.classList.add('is-active');
+                    }
+                });
+            });
+        });
+    </script>
     <?php
 }
 
