@@ -2,9 +2,22 @@
 /*
 Plugin Name: Equalify + UIC Network Utilities
 Description: Scans for public PDF and site URLs. Network or single-site.
-Version: 2.0.3
+Version: 3.0.0
 Author: Blake Bertuccelli-Booth (UIC)
 */
+
+if (!defined('UIC_EQUALIFY_OPTION_PUBLIC_CSV_ENABLED')) {
+    define('UIC_EQUALIFY_OPTION_PUBLIC_CSV_ENABLED', 'uic_equalify_public_csv_enabled');
+}
+if (!defined('UIC_EQUALIFY_OPTION_SCAN_STATUS')) {
+    define('UIC_EQUALIFY_OPTION_SCAN_STATUS', 'uic_equalify_scan_status');
+}
+if (!defined('UIC_EQUALIFY_SCAN_WEEKLY_EVENT')) {
+    define('UIC_EQUALIFY_SCAN_WEEKLY_EVENT', 'uic_equalify_weekly_scan_event');
+}
+if (!defined('UIC_EQUALIFY_SCAN_MANUAL_EVENT')) {
+    define('UIC_EQUALIFY_SCAN_MANUAL_EVENT', 'uic_equalify_manual_scan_event');
+}
 
 /**
  * Add the network admin menu page for Equalify + UIC Utilities
@@ -135,274 +148,272 @@ function uic_equalify_create_scan_results_table() {
     dbDelta($sql);
 }
 
+register_deactivation_hook(__FILE__, 'uic_equalify_on_deactivation');
+function uic_equalify_on_deactivation() {
+    $site_ids = [function_exists('get_current_blog_id') ? (int) get_current_blog_id() : 0];
+    if (is_multisite()) {
+        $site_ids = get_sites([
+            'number' => 0,
+            'fields' => 'ids',
+        ]);
+    }
+
+    foreach ($site_ids as $site_id) {
+        uic_unschedule_site_scans((int) $site_id);
+    }
+}
+
+add_filter('cron_schedules', 'uic_equalify_add_weekly_cron_schedule');
+function uic_equalify_add_weekly_cron_schedule($schedules) {
+    if (!isset($schedules['uic_equalify_weekly'])) {
+        $schedules['uic_equalify_weekly'] = [
+            'interval' => WEEK_IN_SECONDS,
+            'display'  => __('Once Weekly', 'uic-equalify-utilities'),
+        ];
+    }
+    return $schedules;
+}
+
+function uic_get_scan_status_defaults() {
+    return [
+        'state'          => 'idle',
+        'last_started'   => 0,
+        'last_completed' => 0,
+        'last_error'     => '',
+        'last_scan_id'   => '',
+        'last_item_count'=> 0,
+        'progress_processed' => 0,
+        'progress_total'     => 0,
+        'progress_message'   => '',
+    ];
+}
+
+function uic_get_option_for_site($site_id, $option_name, $default = null) {
+    $site_id = (int) $site_id;
+    if (is_multisite() && function_exists('get_current_blog_id') && $site_id !== (int) get_current_blog_id()) {
+        return get_blog_option($site_id, $option_name, $default);
+    }
+    return get_option($option_name, $default);
+}
+
+function uic_update_option_for_site($site_id, $option_name, $value) {
+    $site_id = (int) $site_id;
+    if (is_multisite() && function_exists('get_current_blog_id') && $site_id !== (int) get_current_blog_id()) {
+        return update_blog_option($site_id, $option_name, $value);
+    }
+    return update_option($option_name, $value);
+}
+
+function uic_is_public_csv_enabled_for_site($site_id) {
+    return true;
+}
+
+function uic_get_scan_status_for_site($site_id) {
+    $status = uic_get_option_for_site($site_id, UIC_EQUALIFY_OPTION_SCAN_STATUS, []);
+    if (!is_array($status)) {
+        $status = [];
+    }
+    return array_merge(uic_get_scan_status_defaults(), $status);
+}
+
+function uic_update_scan_status_for_site($site_id, array $updates) {
+    $status = array_merge(uic_get_scan_status_for_site($site_id), $updates);
+    uic_update_option_for_site($site_id, UIC_EQUALIFY_OPTION_SCAN_STATUS, $status);
+    return $status;
+}
+
+function uic_get_public_csv_filename($site_id) {
+    return 'equalify-uic-public-links-site-' . (int) $site_id . '.csv';
+}
+
+function uic_get_public_csv_location($site_id) {
+    $upload_dir = wp_upload_dir();
+    $filename = uic_get_public_csv_filename($site_id);
+
+    return [
+        'path' => trailingslashit($upload_dir['basedir']) . $filename,
+        'url'  => trailingslashit($upload_dir['baseurl']) . $filename,
+    ];
+}
+
+function uic_unschedule_site_scans($site_id) {
+    while ($timestamp = wp_next_scheduled(UIC_EQUALIFY_SCAN_WEEKLY_EVENT, [$site_id])) {
+        wp_unschedule_event($timestamp, UIC_EQUALIFY_SCAN_WEEKLY_EVENT, [$site_id]);
+    }
+    while ($timestamp = wp_next_scheduled(UIC_EQUALIFY_SCAN_MANUAL_EVENT, [$site_id])) {
+        wp_unschedule_event($timestamp, UIC_EQUALIFY_SCAN_MANUAL_EVENT, [$site_id]);
+    }
+}
+
+function uic_schedule_weekly_scan_for_site($site_id) {
+    if (!wp_next_scheduled(UIC_EQUALIFY_SCAN_WEEKLY_EVENT, [$site_id])) {
+        wp_schedule_event(time() + WEEK_IN_SECONDS, 'uic_equalify_weekly', UIC_EQUALIFY_SCAN_WEEKLY_EVENT, [$site_id]);
+    }
+}
+
+function uic_queue_manual_scan_for_site($site_id) {
+    if (!wp_next_scheduled(UIC_EQUALIFY_SCAN_MANUAL_EVENT, [$site_id])) {
+        wp_schedule_single_event(time() + 5, UIC_EQUALIFY_SCAN_MANUAL_EVENT, [$site_id]);
+    }
+    uic_update_scan_status_for_site($site_id, [
+        'state'              => 'queued',
+        'last_error'         => '',
+        'progress_processed' => 0,
+        'progress_total'     => 0,
+        'progress_message'   => 'Waiting for WP-Cron to start.',
+    ]);
+}
+
+function uic_format_admin_time($timestamp) {
+    $timestamp = (int) $timestamp;
+    if ($timestamp <= 0) {
+        return 'Never';
+    }
+    return wp_date('Y-m-d H:i:s T', $timestamp);
+}
+
+function uic_get_status_label($state) {
+    switch ((string) $state) {
+        case 'queued':
+            return 'Queued';
+        case 'running':
+            return 'Running';
+        case 'success':
+            return 'Complete';
+        case 'error':
+            return 'Failed';
+        default:
+            return 'Idle';
+    }
+}
+
+function uic_count_scan_work_units() {
+    $public_post_count = 0;
+    $post_types = get_post_types(['public' => true]);
+    foreach ($post_types as $type) {
+        $counts = wp_count_posts($type);
+        if ($counts && isset($counts->publish)) {
+            $public_post_count += (int) $counts->publish;
+        }
+    }
+
+    $menu_item_count = 0;
+    $menus = wp_get_nav_menus();
+    foreach ($menus as $menu) {
+        $items = wp_get_nav_menu_items($menu);
+        if (!empty($items)) {
+            $menu_item_count += count($items);
+        }
+    }
+
+    return max(1, ($public_post_count * 2) + $menu_item_count);
+}
+
 /**
- * Render the main link scanner page in the network admin
+ * Render plugin settings and scan status.
  */
 function render_link_scanner_page()
 {
     global $wpdb;
     $table_name = $wpdb->base_prefix . 'uic_equalify_scan_results';
     uic_equalify_ensure_schema($table_name);
-    $is_network_context = is_multisite() && is_network_admin();
-    $current_site_id = function_exists('get_current_blog_id') ? get_current_blog_id() : 0;
+    $site_id = function_exists('get_current_blog_id') ? (int) get_current_blog_id() : 0;
+    $notices = [];
 
-    // --- CSV GENERATION BACKGROUND: handle csv generation request ---
-    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['generate_csv']) && check_admin_referer('generate_csv_' . $_POST['generate_csv'])) {
-        $scan_id = sanitize_text_field($_POST['generate_csv']);
-        if (!wp_next_scheduled('uic_generate_csv_event', [$scan_id])) {
-            wp_schedule_single_event(time(), 'uic_generate_csv_event', [$scan_id]);
-            echo '<div class="notice notice-info"><p>CSV generation scheduled. Refresh shortly to download.</p></div>';
-        }
+    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['uic_run_scan_now']) && check_admin_referer('uic_run_scan_now')) {
+        uic_queue_manual_scan_for_site($site_id);
+        $notices[] = ['type' => 'success', 'message' => 'Scan queued and will run in the background shortly.'];
     }
 
-    // Handle deletion of a scan
-    if (isset($_GET['delete_scan']) && isset($_GET['_wpnonce']) && wp_verify_nonce($_GET['_wpnonce'], 'delete_scan_' . $_GET['delete_scan'])) {
-        $scan_id = sanitize_text_field($_GET['delete_scan']);
-        if ($is_network_context) {
-            $wpdb->delete($table_name, ['scan_id' => $scan_id]);
-        } else {
-            $wpdb->delete($table_name, ['scan_id' => $scan_id, 'site_id' => $current_site_id]);
-        }
-        // Delete associated CSV file
-        $upload_dir = wp_upload_dir();
-        $csv_path = $upload_dir['basedir'] . "/scan_" . $scan_id . ".csv";
-        if (file_exists($csv_path)) {
-            unlink($csv_path);
-        }
-        echo '<div class="notice notice-success"><p>Scan deleted.</p></div>';
+    $status = uic_get_scan_status_for_site($site_id);
+    $csv_location = uic_get_public_csv_location($site_id);
+    $csv_exists = file_exists($csv_location['path']);
+    $next_run = wp_next_scheduled(UIC_EQUALIFY_SCAN_WEEKLY_EVENT, [$site_id]);
+    $is_processing = in_array($status['state'], ['queued', 'running'], true);
+    $remaining_units = max(0, (int) $status['progress_total'] - (int) $status['progress_processed']);
+
+    if (!$next_run) {
+        uic_schedule_weekly_scan_for_site($site_id);
+        $next_run = wp_next_scheduled(UIC_EQUALIFY_SCAN_WEEKLY_EVENT, [$site_id]);
     }
 
-    // Bulk delete all scans
-    if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['delete_all_reports']) && check_admin_referer('bulk_report_action')) {
-        if ($is_network_context) {
-            $wpdb->query("TRUNCATE TABLE $table_name");
-            echo '<div class="notice notice-success"><p>All scan results deleted.</p></div>';
-        } else {
-            $wpdb->delete($table_name, ['site_id' => $current_site_id]);
-            echo '<div class="notice notice-success"><p>All scan results for this site deleted.</p></div>';
-        }
+    if ((int) $status['last_completed'] === 0 && !$is_processing) {
+        uic_queue_manual_scan_for_site($site_id);
+        $status = uic_get_scan_status_for_site($site_id);
+        $is_processing = in_array($status['state'], ['queued', 'running'], true);
     }
-
-    // Handle scan scheduling
-    if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-        if (isset($_POST['trigger_all_scans']) && check_admin_referer('uic_trigger_all_scans')) {
-            if ($is_network_context) {
-                uic_schedule_site_scans();
-                echo '<div class="notice notice-success"><p>Scheduled scans for all sites. Results will appear as each site completes.</p></div>';
-            } else {
-                uic_schedule_single_site_scan($current_site_id);
-                echo '<div class="notice notice-success"><p>Scheduled a scan for this site. Results will appear shortly.</p></div>';
-            }
-        }
-    }
-
-    // --- Begin: Scheduled scan detection and stop logic ---
-    $total_sites = 1;
-    $pending_sites = 0;
-    $is_scan_scheduled = false;
-    $current_scan_id = uic_get_scan_id_for_site($current_site_id, $is_network_context);
-    if ($is_network_context) {
-        $sites = uic_get_all_sites_cached();
-        $total_sites = is_array($sites) ? count($sites) : 0;
-        foreach ($sites as $site) {
-            if (wp_next_scheduled('uic_scan_site_links_event', [$site->blog_id])) {
-                $is_scan_scheduled = true;
-                $pending_sites++;
-            }
-        }
-    } else {
-        if (wp_next_scheduled('uic_scan_site_links_event', [$current_site_id])) {
-            $is_scan_scheduled = true;
-            $pending_sites = 1;
-        }
-    }
-
-    if (isset($_POST['stop_all_scans']) && check_admin_referer('uic_stop_all_scans')) {
-        if ($is_network_context) {
-            // Cancel all scheduled scans network-wide
-            if (!isset($sites)) {
-                $sites = uic_get_all_sites_cached();
-            }
-            foreach ($sites as $site) {
-                while ($timestamp = wp_next_scheduled('uic_scan_site_links_event', [$site->blog_id])) {
-                    wp_unschedule_event($timestamp, 'uic_scan_site_links_event', [$site->blog_id]);
-                }
-            }
-            if ($current_scan_id) {
-                $wpdb->delete($table_name, ['scan_id' => $current_scan_id]);
-                $upload_dir = wp_upload_dir();
-                $csv_path = $upload_dir['basedir'] . "/scan_" . $current_scan_id . ".csv";
-                if (file_exists($csv_path)) {
-                    unlink($csv_path);
-                }
-                delete_site_option('uic_equalify_current_scan_id');
-                // Clear per-site stored scan IDs
-                foreach ($sites as $site) {
-                    delete_blog_option($site->blog_id, 'uic_equalify_current_scan_id');
-                }
-            }
-        } else {
-            // Cancel scans for this single site
-            while ($timestamp = wp_next_scheduled('uic_scan_site_links_event', [$current_site_id])) {
-                wp_unschedule_event($timestamp, 'uic_scan_site_links_event', [$current_site_id]);
-            }
-            if ($current_scan_id) {
-                $wpdb->delete($table_name, ['scan_id' => $current_scan_id, 'site_id' => $current_site_id]);
-                $upload_dir = wp_upload_dir();
-                $csv_path = $upload_dir['basedir'] . "/scan_" . $current_scan_id . ".csv";
-                if (file_exists($csv_path)) {
-                    unlink($csv_path);
-                }
-                delete_option('uic_equalify_current_scan_id');
-            }
-        }
-        echo '<div class="notice notice-success"><p>All scheduled scans have been cancelled.</p></div>';
-        $is_scan_scheduled = false;
-        $pending_sites = 0;
-    }
-    // --- End: Scheduled scan detection and stop logic ---
     ?>
     <div class="wrap">
-        <h1>UIC + Equalify Utilities</h1>
-        <h3><?php echo $is_network_context ? 'Network Scan' : 'Site Scan'; ?></h3>
-        <p>Scans for public PDFs and site URLs. This will schedule scans to run in the background.</p>
-        <?php if ($is_scan_scheduled): ?>
-            <div class="notice notice-info">
-                <p>
-                    A full <?php echo $is_network_context ? 'network' : 'site'; ?> scan is currently scheduled or in progress.
-                    <?php if ($total_sites > 0): ?>
-                        <?php echo esc_html($pending_sites); ?> of <?php echo esc_html($total_sites); ?> <?php echo $is_network_context ? 'sites' : 'runs'; ?> remain to be scanned.
-                    <?php endif; ?>
-                    <a href="<?php echo esc_url(add_query_arg([])); ?>">Refresh this page</a>
-                </p>
-            </div>
-            <form method="post">
-                <?php wp_nonce_field('uic_stop_all_scans'); ?>
-                <input type="submit" name="stop_all_scans" class="button button-secondary" value="Stop <?php echo $is_network_context ? 'Network' : 'Site'; ?> Scan">
-            </form>
-        <?php else: ?>
-            <form method="post">
-                <?php wp_nonce_field('uic_trigger_all_scans'); ?>
-                <input type="submit" name="trigger_all_scans" class="button button-primary" value="Run Full <?php echo $is_network_context ? 'Network' : 'Site'; ?> Scan">
-            </form>
+        <h1>Equalify + UIC Utilities</h1>
+        <p>Schedule weekly background scans that publish a single CSV containing PDFs and public pages.</p>
+
+        <?php foreach ($notices as $notice): ?>
+            <div class="notice notice-<?php echo esc_attr($notice['type']); ?>"><p><?php echo esc_html($notice['message']); ?></p></div>
+        <?php endforeach; ?>
+
+        <?php if (!empty($status['last_error'])): ?>
+            <div class="notice notice-error"><p><?php echo esc_html($status['last_error']); ?></p></div>
         <?php endif; ?>
 
-        <h3>Scan Results</h3>
-        <?php
-        // List all unique scan_id and timestamp
-        if ($is_network_context) {
-            $scans = $wpdb->get_results("SELECT scan_id, MIN(timestamp) as ts, COUNT(*) as count FROM $table_name GROUP BY scan_id ORDER BY ts DESC", ARRAY_A);
-        } else {
-            // Single-site view: only show site-specific scans, hide network scans.
-            $scans = $wpdb->get_results($wpdb->prepare("SELECT scan_id, MIN(timestamp) as ts, COUNT(*) as count FROM $table_name WHERE site_id = %d AND scan_id NOT LIKE %s GROUP BY scan_id ORDER BY ts DESC", $current_site_id, 'scan_network_%'), ARRAY_A);
-        }
-        $has_pending_csv = false;
-        // Get current scan ID (in-progress scan)
-        $current_scan_indicator = $current_scan_id;
-        if ($scans): ?>
-            <table class="widefat fixed striped">
-                <thead>
-                    <tr>
-                        <th>Scan ID</th>
-                        <th>Date</th>
-                        <th>Items</th>
-                        <th>Actions</th>
-                    </tr>
-                </thead>
-                <tbody>
-                <?php foreach ($scans as $scan): ?>
-                    <tr>
-                        <td><?php echo esc_html($scan['scan_id']); ?></td>
-                        <td><?php echo esc_html(date('Y-m-d H:i:s', strtotime($scan['ts']))); ?></td>
-                        <td><?php echo intval($scan['count']); ?></td>
-                        <td>
-                        <?php
-                        // CSV generation/download button logic
-                        $upload_dir = wp_upload_dir();
-                        $csv_path = $upload_dir['basedir'] . "/scan_" . $scan['scan_id'] . ".csv";
-                        $is_current_scan = ($scan['scan_id'] === $current_scan_indicator && $current_scan_indicator);
-                        $csv_job_scheduled = (bool) wp_next_scheduled('uic_generate_csv_event', [$scan['scan_id']]);
-                        if ($is_current_scan) {
-                            // If currently scanning, only show disabled button
-                            echo '<button class="button button-small" disabled>Currently Scanning</button> ';
-                            $has_pending_csv = true;
-                        } else {
-                            // Not currently scanning: show CSV actions and Delete
-                            if (file_exists($csv_path)) {
-                                $csv_url = $upload_dir['baseurl'] . "/scan_" . $scan['scan_id'] . ".csv";
-                                echo '<a class="button button-small" href="' . esc_url($csv_url) . '">Download CSV</a> ';
-                            } else {
-                                if ($csv_job_scheduled) {
-                                    $has_pending_csv = true;
-                                    echo '<button class="button button-small" disabled>Generating CSV...</button> ';
-                                } else {
-                                    echo '<form method="post" class="uic-generate-csv-form" style="display:inline;">';
-                                    wp_nonce_field('generate_csv_' . $scan['scan_id']);
-                                    echo '<input type="hidden" name="generate_csv" value="' . esc_attr($scan['scan_id']) . '">';
-                                    echo '<input type="submit" class="button button-small uic-generate-csv-button" value="Generate CSV" data-loading-text="Generating CSV..." aria-live="polite">';
-                                    echo '<span class="spinner" style="float:none; margin:0 0 0 6px;"></span>';
-                                    echo '</form>';
-                                }
-                            }
-                            echo '<a class="button button-small" href="' . esc_url(wp_nonce_url(add_query_arg(['delete_scan' => $scan['scan_id']]), 'delete_scan_' . $scan['scan_id'])) . '" onclick="return confirm(\'Delete this scan and all results?\');">Delete</a>';
-                        }
-                        ?>
-                        </td>
-                    </tr>
-                <?php endforeach; ?>
-                </tbody>
-            </table>
-            <form method="post" style="margin-top: 1em;">
-                <?php wp_nonce_field('bulk_report_action'); ?>
-                <input type="submit" name="delete_all_reports" class="button" value="Delete All Scans" onclick="return confirm('Are you sure you want to delete ALL scan results?');">
-            </form>
-        <?php else: ?>
-            <p>No scan results found.</p>
-        <?php endif; ?>
+        <h2>Scan Status</h2>
+        <table class="widefat striped" style="max-width: 900px;">
+            <tbody>
+                <tr>
+                    <th>Status</th>
+                    <td><?php echo esc_html(uic_get_status_label($status['state'])); ?></td>
+                </tr>
+                <tr>
+                    <th>CSV URL</th>
+                    <td>
+                        <?php if ($csv_exists): ?>
+                            <a href="<?php echo esc_url($csv_location['url']); ?>" target="_blank" rel="noopener"><?php echo esc_html($csv_location['url']); ?></a>
+                        <?php else: ?>
+                            Not generated yet.
+                        <?php endif; ?>
+                    </td>
+                </tr>
+                <tr>
+                    <th>Next Weekly Run</th>
+                    <td><?php echo $next_run ? esc_html(uic_format_admin_time($next_run)) : 'Not scheduled'; ?></td>
+                </tr>
+                <tr>
+                    <th>Last Started</th>
+                    <td><?php echo esc_html(uic_format_admin_time($status['last_started'])); ?></td>
+                </tr>
+                <tr>
+                    <th>Last Completed</th>
+                    <td><?php echo esc_html(uic_format_admin_time($status['last_completed'])); ?></td>
+                </tr>
+                <tr>
+                    <th>Rows in Latest CSV</th>
+                    <td><?php echo esc_html((string) (int) $status['last_item_count']); ?></td>
+                </tr>
+                <tr>
+                    <th>Progress</th>
+                    <td>
+                        <?php echo esc_html((string) (int) $status['progress_processed']); ?> / <?php echo esc_html((string) (int) $status['progress_total']); ?>
+                        <?php if ($is_processing): ?>
+                            (<?php echo esc_html((string) $remaining_units); ?> remaining)
+                        <?php endif; ?>
+                        <?php if (!empty($status['progress_message'])): ?>
+                            <br><?php echo esc_html($status['progress_message']); ?>
+                        <?php endif; ?>
+                    </td>
+                </tr>
+            </tbody>
+        </table>
+
+        <form method="post" style="margin-top: 1rem;">
+            <?php wp_nonce_field('uic_run_scan_now'); ?>
+            <input type="submit" name="uic_run_scan_now" class="button button-secondary" value="Run Scan Now">
+        </form>
     </div>
-    <?php if ($is_scan_scheduled || $has_pending_csv): ?>
+    <?php if ($is_processing): ?>
         <script>
-            // Auto-refresh while scans or CSV generation are in progress
-            setTimeout(function() { location.reload(); }, 3000);
+            setTimeout(function () { window.location.reload(); }, 5000);
         </script>
     <?php endif; ?>
-    <script>
-        document.addEventListener('DOMContentLoaded', function() {
-            var forms = document.querySelectorAll('.uic-generate-csv-form');
-            forms.forEach(function(form) {
-                form.addEventListener('submit', function() {
-                    var button = form.querySelector('.uic-generate-csv-button');
-                    if (!button) {
-                        return;
-                    }
-                    button.disabled = true;
-                    var loadingText = button.getAttribute('data-loading-text');
-                    if (loadingText) {
-                        button.value = loadingText;
-                    }
-                    var spinner = form.querySelector('.spinner');
-                    if (spinner) {
-                        spinner.classList.add('is-active');
-                    }
-                });
-            });
-        });
-    </script>
     <?php
-}
-
-/**
- * Cached wrapper for get_sites using the Transients API to avoid redundant calls.
- *
- * @return array
- */
-function uic_get_all_sites_cached() {
-    $cached_sites = get_transient('uic_all_sites');
-    if ($cached_sites === false) {
-        $cached_sites = get_sites(['number' => 0]);
-        set_transient('uic_all_sites', $cached_sites, 5 * MINUTE_IN_SECONDS);
-    }
-    return $cached_sites;
 }
 
 /**
@@ -410,7 +421,7 @@ function uic_get_all_sites_cached() {
  *
  * @return string scan_id
  */
-function scan_links($scan_id = null)
+function scan_links($scan_id = null, $progress_callback = null)
 {
     global $wpdb;
     $table_name = $wpdb->base_prefix . 'uic_equalify_scan_results';
@@ -439,6 +450,9 @@ function scan_links($scan_id = null)
             foreach ($query->posts as $post_id) {
                 $post = get_post($post_id);
                 if (!$post || $post->post_status !== 'publish' || !empty($post->post_password)) {
+                    if (is_callable($progress_callback)) {
+                        $progress_callback('Scanning posts and ACF fields');
+                    }
                     continue;
                 }
                 $content = $post->post_content;
@@ -525,6 +539,9 @@ function scan_links($scan_id = null)
                         }
                     }
                 }
+                if (is_callable($progress_callback)) {
+                    $progress_callback('Scanning posts and ACF fields');
+                }
             }
             $paged++;
             $args['paged'] = $paged;
@@ -584,6 +601,9 @@ function scan_links($scan_id = null)
                         $batch_rows = [];
                     }
                 }
+                if (is_callable($progress_callback)) {
+                    $progress_callback('Scanning navigation menus');
+                }
             }
         }
     }
@@ -617,6 +637,9 @@ function scan_links($scan_id = null)
             foreach ($query->posts as $post_id) {
                 $post = get_post($post_id);
                 if (!$post || $post->post_status !== 'publish' || !empty($post->post_password)) {
+                    if (is_callable($progress_callback)) {
+                        $progress_callback('Building public URL entries');
+                    }
                     continue;
                 }
                 $row = [
@@ -641,6 +664,9 @@ function scan_links($scan_id = null)
                     $wpdb->query($wpdb->prepare($sql, ...$values));
                     $public_rows = [];
                 }
+                if (is_callable($progress_callback)) {
+                    $progress_callback('Building public URL entries');
+                }
             }
             $paged++;
             $args['paged'] = $paged;
@@ -662,59 +688,99 @@ function scan_links($scan_id = null)
     return $scan_id;
 }
 
-// Schedule scans for all sites, assigning a shared scan ID
-function uic_schedule_site_scans() {
-    $sites = uic_get_all_sites_cached();
-    $shared_scan_id = uic_generate_scan_id(0, true);
-    update_site_option('uic_equalify_current_scan_id', $shared_scan_id);
-    foreach ($sites as $site) {
-        if (!wp_next_scheduled('uic_scan_site_links_event', [$site->blog_id])) {
-            uic_set_scan_id_for_site($site->blog_id, $shared_scan_id);
-            wp_schedule_single_event(time() + rand(0, 300), 'uic_scan_site_links_event', [$site->blog_id]);
-        }
-    }
-}
+add_action(UIC_EQUALIFY_SCAN_WEEKLY_EVENT, 'uic_process_scheduled_scan', 10, 1);
+add_action(UIC_EQUALIFY_SCAN_MANUAL_EVENT, 'uic_process_scheduled_scan', 10, 1);
 
-// Schedule a scan for the current site only
-function uic_schedule_single_site_scan($site_id) {
-    $scan_id = uic_generate_scan_id($site_id, false);
-    uic_set_scan_id_for_site($site_id, $scan_id);
-    if (!wp_next_scheduled('uic_scan_site_links_event', [$site_id])) {
-        wp_schedule_single_event(time(), 'uic_scan_site_links_event', [$site_id]);
-    }
-}
+function uic_process_scheduled_scan($site_id) {
+    global $wpdb;
 
-add_action('uic_scan_site_links_event', 'uic_handle_site_scan', 10, 1);
-function uic_handle_site_scan($site_id) {
+    $site_id = (int) $site_id;
+    if ($site_id <= 0) {
+        $site_id = function_exists('get_current_blog_id') ? (int) get_current_blog_id() : 0;
+    }
+
     $switched = false;
-    if (function_exists('switch_to_blog') && is_multisite()) {
+    if (is_multisite() && function_exists('switch_to_blog') && function_exists('get_current_blog_id') && $site_id !== (int) get_current_blog_id()) {
         switch_to_blog($site_id);
         $switched = true;
     }
-    $scan_id = uic_get_scan_id_for_site($site_id, is_multisite());
-    scan_links($scan_id);
-    if ($switched) {
-        restore_current_blog();
-    }
 
-    // After restoring blog, check if any scheduled scans remain across all sites
-    if (is_multisite()) {
-        $sites = uic_get_all_sites_cached();
-        $any_scheduled = false;
-        foreach ($sites as $site) {
-            if (wp_next_scheduled('uic_scan_site_links_event', [$site->blog_id])) {
-                $any_scheduled = true;
-                break;
-            }
+    $scan_started = false;
+    try {
+        if (!uic_is_public_csv_enabled_for_site($site_id)) {
+            uic_update_scan_status_for_site($site_id, [
+                'state' => 'idle',
+            ]);
+        } else {
+            $table_name = $wpdb->base_prefix . 'uic_equalify_scan_results';
+            uic_equalify_ensure_schema($table_name);
+            $total_work_units = uic_count_scan_work_units();
+            $progress_processed = 0;
+            $last_progress_update = microtime(true);
+
+            uic_update_scan_status_for_site($site_id, [
+                'state'              => 'running',
+                'last_started'       => current_time('timestamp'),
+                'last_error'         => '',
+                'progress_processed' => 0,
+                'progress_total'     => $total_work_units,
+                'progress_message'   => 'Starting scan...',
+            ]);
+
+            $scan_id = uic_generate_scan_id($site_id, false);
+            uic_set_scan_id_for_site($site_id, $scan_id);
+            $scan_started = true;
+
+            // Keep only latest scan results for this site.
+            $wpdb->delete($table_name, ['site_id' => $site_id], ['%d']);
+
+            $progress_callback = function ($message = '') use ($site_id, $total_work_units, &$progress_processed, &$last_progress_update) {
+                $progress_processed++;
+                $should_update = ($progress_processed % 25) === 0 || (microtime(true) - $last_progress_update) >= 2;
+                if (!$should_update && $progress_processed < $total_work_units) {
+                    return;
+                }
+                $last_progress_update = microtime(true);
+                uic_update_scan_status_for_site($site_id, [
+                    'state'              => 'running',
+                    'progress_processed' => min($progress_processed, $total_work_units),
+                    'progress_total'     => $total_work_units,
+                    'progress_message'   => (string) $message,
+                ]);
+            };
+
+            scan_links($scan_id, $progress_callback);
+            uic_update_scan_status_for_site($site_id, [
+                'state'              => 'running',
+                'progress_processed' => $total_work_units,
+                'progress_total'     => $total_work_units,
+                'progress_message'   => 'Generating CSV...',
+            ]);
+            $row_count = uic_generate_csv_for_site_scan($site_id, $scan_id);
+
+            uic_update_scan_status_for_site($site_id, [
+                'state'              => 'success',
+                'last_completed'     => current_time('timestamp'),
+                'last_error'         => '',
+                'last_scan_id'       => $scan_id,
+                'last_item_count'    => $row_count,
+                'progress_processed' => $total_work_units,
+                'progress_total'     => $total_work_units,
+                'progress_message'   => 'Scan complete.',
+            ]);
         }
-        if (!$any_scheduled) {
-            // No more scheduled scans, clear scan status
-            delete_site_option('uic_equalify_current_scan_id');
+    } catch (Throwable $e) {
+        uic_update_scan_status_for_site($site_id, [
+            'state'            => 'error',
+            'last_error'       => 'Scan failed: ' . $e->getMessage(),
+            'progress_message' => 'Scan failed before completion.',
+        ]);
+    } finally {
+        if ($scan_started) {
+            uic_clear_scan_id_for_site($site_id);
         }
-        delete_blog_option($site_id, 'uic_equalify_current_scan_id');
-    } else {
-        if (!wp_next_scheduled('uic_scan_site_links_event', [$site_id])) {
-            delete_option('uic_equalify_current_scan_id');
+        if ($switched) {
+            restore_current_blog();
         }
     }
 }
@@ -748,37 +814,56 @@ function uic_format_scan_row_for_csv(array $row) {
     // Skip private or unsupported link types.
     return null;
 }
-// -- CSV generation event for scan results --
-add_action('uic_generate_csv_event', 'uic_generate_csv_for_scan');
-
-function uic_generate_csv_for_scan($scan_id) {
+function uic_generate_csv_for_site_scan($site_id, $scan_id) {
     global $wpdb;
     $table_name = $wpdb->base_prefix . 'uic_equalify_scan_results';
-    $upload_dir = wp_upload_dir();
-    $csv_path = $upload_dir['basedir'] . "/scan_$scan_id.csv";
-    $out = fopen($csv_path, 'w');
+    $csv_location = uic_get_public_csv_location($site_id);
+    $csv_path = $csv_location['path'];
+    $temp_path = $csv_path . '.tmp';
+    $out = fopen($temp_path, 'w');
     if ($out === false) {
-        return;
+        throw new RuntimeException('Unable to open CSV file for writing.');
     }
     fputcsv($out, ['url', 'type']);
 
     $offset = 0;
     $limit = 500;
+    $written_rows = 0;
     while (true) {
         $rows = $wpdb->get_results(
-            $wpdb->prepare("SELECT * FROM $table_name WHERE scan_id = %s ORDER BY id ASC LIMIT %d OFFSET %d", $scan_id, $limit, $offset),
+            $wpdb->prepare(
+                "SELECT * FROM $table_name WHERE site_id = %d AND scan_id = %s ORDER BY id ASC LIMIT %d OFFSET %d",
+                $site_id,
+                $scan_id,
+                $limit,
+                $offset
+            ),
             ARRAY_A
         );
-        if (empty($rows)) break;
+        if (empty($rows)) {
+            break;
+        }
         foreach ($rows as $row) {
             $csv_row = uic_format_scan_row_for_csv($row);
             if ($csv_row === null) {
                 continue;
             }
             fputcsv($out, array_values($csv_row));
+            $written_rows++;
         }
         $offset += $limit;
     }
 
     fclose($out);
+    if (!@rename($temp_path, $csv_path)) {
+        if (file_exists($csv_path)) {
+            @unlink($csv_path);
+        }
+        if (!@rename($temp_path, $csv_path)) {
+            @unlink($temp_path);
+            throw new RuntimeException('Unable to replace the public CSV file.');
+        }
+    }
+
+    return $written_rows;
 }
